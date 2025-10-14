@@ -1,0 +1,51 @@
+# Build outputs
+bin/
+obj/
+[Bb]uild/
+[Ll]og/
+[Ll]ogs/
+
+# VS / Rider / tooling
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# NuGet
+*.nupkg
+*.snupkg
+**/packages/*
+!.nuget/
+.nuget/packages/
+
+# Test + coverage
+TestResults/
+*.coverage
+*.coveragexml
+.coverage/
+.coveragexml/
+*.trx
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Resharper / Analysis
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+
+# Publish artifacts you might create locally
+publish/
+artifacts/
+
+# Rider / MSBuild caches
+*.pidb
+*.svclog
+*.scc
+
+# Local config
+appsettings.*.local.json
