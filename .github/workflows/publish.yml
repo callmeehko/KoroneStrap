@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rid: [ win-x64, win-arm64 ]
+        rid: [ win-x64 ]
 
     steps:
       - name: Checkout
@@ -101,4 +101,4 @@ jobs:
         with:
           files: artifacts/**/*.zip
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.TOKEN }}
