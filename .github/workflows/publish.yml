@@ -3,15 +3,14 @@ name: Publish (Self-contained)
 on:
   push:
     branches: [ main, master ]
-    tags:
-      - 'v*'
+    tags: [ 'v*' ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: windows-latest
     env:
-      DOTNET_VERSION: '6.0.x'
+      DOTNET_VERSION: '8.0.x'
       PROJECT_FILE: 'KoroneStrapper.csproj'
       APP_NAME: 'KoroneStrapper'
 
@@ -19,6 +18,7 @@ jobs:
       fail-fast: false
       matrix:
         rid: [ win-x64, win-arm64 ]
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,53 +31,51 @@ jobs:
       - name: Restore
         run: dotnet restore "${{ env.PROJECT_FILE }}"
 
-      - name: Publish (self-contained single-file)
-        run: >
-          dotnet publish "${{ env.PROJECT_FILE }}"
-          -c Release
-          -r ${{ matrix.rid }}
-          --self-contained true
-          -p:PublishSingleFile=true
-          -p:IncludeNativeLibrariesForSelfExtract=true
-          -p:DebugType=None
-          -p:ErrorOnDuplicatePublishOutputFiles=false
-          -p:EnableCompressionInSingleFile=true
-
-      - name: Locate output
-        id: out
+      - name: Publish
         shell: pwsh
         run: |
-          $outDir = Join-Path (Split-Path "${{ env.PROJECT_FILE }}") "bin\Release"
-          $tfm = (Get-ChildItem $outDir -Directory | Sort-Object Name -Descending | Select-Object -First 1).Name
-          $pub = Join-Path $outDir "$tfm\${{ matrix.rid }}\publish"
-          echo "publish_dir=$pub" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          echo "tfm=$tfm" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-
-      - name: Package zip
-        shell: pwsh
-        run: |
-          $pub = '${{ steps.out.outputs.publish_dir }}'
-          $tfm = '${{ steps.out.outputs.tfm }}'
           $rid = '${{ matrix.rid }}'
+          # e.g. out/publish/win-x64
+          $env:PUBLISH_DIR = "out/publish/$rid"
+          if (Test-Path $env:PUBLISH_DIR) { Remove-Item $env:PUBLISH_DIR -Recurse -Force }
+          dotnet publish "${{ env.PROJECT_FILE }}" `
+            -c Release `
+            -r $rid `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:EnableCompressionInSingleFile=true `
+            -p:DebugType=None `
+            -o "$env:PUBLISH_DIR"
+
+      - name: Package
+        id: package
+        shell: pwsh
+        run: |
+          $rid = '${{ matrix.rid }}'
+          $pub = "out/publish/$rid"
+          if (-not (Test-Path $pub)) { throw "Publish dir not found: $pub" }
+
           $version = if ($env:GITHUB_REF -like 'refs/tags/*') {
             $env:GITHUB_REF -replace 'refs/tags/',''
           } else {
             (Get-Date -Format 'yyyyMMdd-HHmm')
           }
-          $zipName = "${{ env.APP_NAME }}-$version-$tfm-$rid.zip"
+
+          $zipName = "${{ env.APP_NAME }}-$version-$rid.zip"
           $zipPath = Join-Path $pwd $zipName
 
-          # Optional: include README / LICENSE if present
-          $temp = Join-Path $pwd "package-$rid"
-          if (Test-Path $temp) { Remove-Item $temp -Recurse -Force }
-          New-Item $temp -ItemType Directory | Out-Null
-          Copy-Item "$pub\*" $temp -Recurse
-          if (Test-Path "README.md") { Copy-Item "README.md" $temp }
-          if (Test-Path "LICENSE")   { Copy-Item "LICENSE"   $temp }
+          # stage + optional extras
+          $stage = "out/stage/$rid"
+          if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+          New-Item $stage -ItemType Directory | Out-Null
+          Copy-Item "$pub\*" $stage -Recurse
+          if (Test-Path "README.md") { Copy-Item "README.md" $stage }
+          if (Test-Path "LICENSE")   { Copy-Item "LICENSE"   $stage }
 
           if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-          Compress-Archive -Path "$temp\*" -DestinationPath $zipPath
-          Remove-Item $temp -Recurse -Force
+          Compress-Archive -Path "$stage\*" -DestinationPath $zipPath
+          Remove-Item $stage -Recurse -Force
 
           echo "zip=$zipPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           echo "zip_name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
@@ -85,8 +83,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.out.outputs.tfm }}-${{ matrix.rid }}
-          path: ${{ steps.package.outputs.zip || steps.out.outputs.zip || steps.package.outputs.zip_path || steps.package.outputs.zipname || steps.package.outputs.zipfile || '' }}
+          name: ${{ matrix.rid }}
+          path: ${{ steps.package.outputs.zip }}
 
   release:
     if: startsWith(github.ref, 'refs/tags/')
@@ -101,7 +99,6 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            artifacts/**/**/*.zip
+          files: artifacts/**/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
