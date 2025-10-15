@@ -1,6 +1,5 @@
 using System;
 using System.Diagnostics;
-using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -14,6 +13,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.Drawing;
 using DiscordRPC;
 using RpcButton = DiscordRPC.Button;
 
@@ -85,16 +85,26 @@ namespace KoroneStrapper
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
 
-                using var tray = new TrayContext(set.placeId, set.gameName, set.gameUrl);
-                var logCts = new CancellationTokenSource();
-                using var logWatcher = new KoroneLogWatcher(newState =>
+                int presenceEnabled = 1;
+                string latestState = set.initialState ?? "";
+                bool IsEnabled() => Volatile.Read(ref presenceEnabled) == 1;
+                void SetEnabled(bool enabled) => Volatile.Write(ref presenceEnabled, enabled ? 1 : 0);
+
+                void ApplyPresence(string state)
                 {
+                    latestState = state ?? "";
                     try
                     {
+                        if (!IsEnabled())
+                        {
+                            rpc.ClearPresence();
+                            return;
+                        }
+
                         var rich = new RichPresence
                         {
                             Details = set.gameName,
-                            State = newState ?? "",
+                            State = latestState,
                             Timestamps = new Timestamps { Start = set.startedAtUtc },
                             Assets = new Assets
                             {
@@ -105,6 +115,36 @@ namespace KoroneStrapper
                             Buttons = new[] { new RpcButton { Label = "View Game", Url = set.gameUrl } }
                         };
                         rpc.SetPresence(rich);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine("Failed to apply presence: " + ex.Message);
+                    }
+                }
+
+                using var tray = new TrayContext(set.placeId, set.gameName, set.gameUrl);
+
+                tray.PresenceToggled += enabled =>
+                {
+                    SetEnabled(enabled);
+                    if (enabled)
+                    {
+                        Console.WriteLine("Rich Presence enabled via tray; reapplying…");
+                        ApplyPresence(latestState);
+                    }
+                    else
+                    {
+                        Console.WriteLine("Rich Presence disabled via tray; clearing…");
+                        try { rpc.ClearPresence(); } catch { }
+                    }
+                };
+
+                var logCts = new CancellationTokenSource();
+                using var logWatcher = new KoroneLogWatcher(newState =>
+                {
+                    try
+                    {
+                        ApplyPresence(newState ?? "");
                         Console.WriteLine($"Presence state updated via SDK → {newState}");
                     }
                     catch (Exception ex)
@@ -155,7 +195,8 @@ namespace KoroneStrapper
             return await JsonSerializer.DeserializeAsync<UserMe>(s, JsonOpts, cancel);
         }
 
-        private static async Task<(bool success, long placeId, string gameName, string gameUrl, DateTime startedAtUtc, string iconUrl)> PollPresenceUntilSetOnceAsync(HttpClient http, DiscordRpcClient rpc, long userId, int maxAttempts, CancellationToken cancel)
+        private static async Task<(bool success, long placeId, string gameName, string gameUrl, DateTime startedAtUtc, string iconUrl, string initialState)>
+            PollPresenceUntilSetOnceAsync(HttpClient http, DiscordRpcClient rpc, long userId, int maxAttempts, CancellationToken cancel)
         {
             var delay = TimeSpan.FromSeconds(5);
             for (int attempt = 1; attempt <= maxAttempts; attempt++)
@@ -179,10 +220,12 @@ namespace KoroneStrapper
                             var iconUrl = icon?.Data?.FirstOrDefault()?.ImageUrl;
                             var startedAt = DateTimeOffset.UtcNow;
                             var gameUrl = $"https://www.pekora.zip/games/{placeId}/--";
+                            var initialState = $"{place.Year}";
+
                             var rich = new RichPresence
                             {
                                 Details = place.Name,
-                                State = $"{place.Year}",
+                                State = initialState,
                                 Timestamps = new Timestamps { Start = startedAt.UtcDateTime },
                                 Assets = new Assets
                                 {
@@ -194,7 +237,7 @@ namespace KoroneStrapper
                             };
                             rpc.SetPresence(rich);
                             Console.WriteLine($"Presence set → {place.Name} (placeId {placeId}).");
-                            return (true, placeId, place.Name, gameUrl, startedAt.UtcDateTime, iconUrl);
+                            return (true, placeId, place.Name, gameUrl, startedAt.UtcDateTime, iconUrl, initialState);
                         }
                     }
                     else
@@ -208,7 +251,7 @@ namespace KoroneStrapper
                 }
                 if (attempt < maxAttempts) await Task.Delay(delay, cancel);
             }
-            return (false, 0L, null, null, default, null);
+            return (false, 0L, null, null, default, null, null);
         }
 
         private static async Task<UserPresenceResponse> GetUserPresenceAsync(HttpClient http, string userId, CancellationToken cancel)
@@ -277,8 +320,11 @@ namespace KoroneStrapper
             private readonly ContextMenuStrip menu;
             private readonly ToolStripMenuItem openItem;
             private readonly ToolStripMenuItem exitItem;
+            private readonly ToolStripMenuItem presenceToggleItem;
             private readonly MethodInfo showMenuMi;
             private readonly Icon trayIcon;
+
+            public event Action<bool> PresenceToggled;
 
             public TrayContext(long placeId, string gameName, string gameUrl)
             {
@@ -287,6 +333,17 @@ namespace KoroneStrapper
                 var infoLabel = new ToolStripMenuItem($"Game: {gameName}\nPlaceId: {placeId}") { Enabled = false };
                 openItem = new ToolStripMenuItem("Open Game Page");
                 exitItem = new ToolStripMenuItem("Exit");
+
+                presenceToggleItem = new ToolStripMenuItem("Discord Rich Presence")
+                {
+                    CheckOnClick = true,
+                    Checked = true,
+                    ToolTipText = "Enable/disable Discord Rich Presence updates."
+                };
+                presenceToggleItem.CheckedChanged += (_, __) =>
+                {
+                    try { PresenceToggled?.Invoke(presenceToggleItem.Checked); } catch { }
+                };
 
                 openItem.Click += (_, __) =>
                 {
@@ -298,6 +355,7 @@ namespace KoroneStrapper
                 menu.Items.Add(infoLabel);
                 menu.Items.Add(new ToolStripSeparator());
                 menu.Items.Add(openItem);
+                menu.Items.Add(presenceToggleItem);
                 menu.Items.Add(exitItem);
 
                 trayIcon = LoadEmbeddedIcon("KoroneStrapper.Resources.icon.ico");
@@ -345,7 +403,6 @@ namespace KoroneStrapper
             }
         }
 
-
         private sealed class UserMe { [JsonPropertyName("id")] public long? Id { get; set; } }
         private sealed class UserIdsPayload { [JsonPropertyName("userIds")] public string[] UserIds { get; set; } }
         private sealed class UserPresenceResponse { [JsonPropertyName("userPresences")] public UserPresence[] UserPresences { get; set; } }
@@ -373,9 +430,7 @@ namespace KoroneStrapper
 
         private sealed class KoroneLogWatcher : IDisposable
         {
-            private readonly Regex lineRegex =
-                new(@"\[\s*KORONESTRAPSDK\s*\]\s*\(?([A-Za-z0-9+/=]+)\)?", RegexOptions.Compiled);
-
+            private readonly Regex lineRegex = new(@"\[\s*KORONESTRAPSDK\s*\]\s*\(?([A-Za-z0-9+/=]+)\)?", RegexOptions.Compiled);
             private readonly Action<string> onPresenceState;
             private FileSystemWatcher fsw;
             private FileStream fs;
@@ -388,10 +443,7 @@ namespace KoroneStrapper
             public KoroneLogWatcher(Action<string> onPresenceState)
             {
                 this.onPresenceState = onPresenceState;
-                logsDir = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "Roblox", "logs"
-                );
+                logsDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Roblox", "logs");
             }
 
             public async Task StartAsync(CancellationToken cancel)
@@ -433,8 +485,7 @@ namespace KoroneStrapper
             private static bool IsLogFile(string path)
             {
                 var ext = Path.GetExtension(path);
-                return string.Equals(ext, ".log", StringComparison.OrdinalIgnoreCase) ||
-                       string.Equals(ext, ".txt", StringComparison.OrdinalIgnoreCase);
+                return string.Equals(ext, ".log", StringComparison.OrdinalIgnoreCase) || string.Equals(ext, ".txt", StringComparison.OrdinalIgnoreCase);
             }
 
             private bool OpenLatestLog(bool reopen = false)
@@ -468,9 +519,7 @@ namespace KoroneStrapper
             private static string GetNewestCreatedLogOrTxt(string dir)
                 => new DirectoryInfo(dir)
                     .GetFiles()
-                    .Where(f =>
-                        string.Equals(f.Extension, ".log", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(f.Extension, ".txt", StringComparison.OrdinalIgnoreCase))
+                    .Where(f => string.Equals(f.Extension, ".log", StringComparison.OrdinalIgnoreCase) || string.Equals(f.Extension, ".txt", StringComparison.OrdinalIgnoreCase))
                     .OrderByDescending(f => f.CreationTimeUtc)
                     .FirstOrDefault()?.FullName;
 
@@ -486,8 +535,7 @@ namespace KoroneStrapper
                     var json = Encoding.UTF8.GetString(bytes);
 
                     using var doc = JsonDocument.Parse(json);
-                    if (!doc.RootElement.TryGetProperty("activityType", out var t) ||
-                        !doc.RootElement.TryGetProperty("value", out var v))
+                    if (!doc.RootElement.TryGetProperty("activityType", out var t) || !doc.RootElement.TryGetProperty("value", out var v))
                         return;
 
                     var type = t.GetString();
